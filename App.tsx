@@ -1,263 +1,177 @@
-import {useEffect, useRef, useState} from 'react';
-import {StyleSheet, Text, Button, View} from 'react-native';
+import React, {useCallback, useEffect, useState} from 'react';
 import {
-  Frame,
-  Camera as VisionCamera,
-  useCameraDevice,
-  useCameraPermission,
-} from 'react-native-vision-camera';
-import {useIsFocused} from '@react-navigation/core';
-import {useAppState} from '@react-native-community/hooks';
-import {SafeAreaProvider} from 'react-native-safe-area-context';
-import {NavigationContainer} from '@react-navigation/native';
+  Dimensions,
+  Linking,
+  StyleSheet,
+  Text,
+  useColorScheme,
+  View,
+} from 'react-native';
 import {
   Camera,
-  Face,
-  FaceDetectionOptions,
+  CameraPosition,
+  useCameraDevice,
+  useCameraFormat,
+  useCameraPermission,
+  useSkiaFrameProcessor,
+} from 'react-native-vision-camera';
+import {
+  Contours,
+  useFaceDetector,
 } from 'react-native-vision-camera-face-detector';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-} from 'react-native-reanimated';
+import {ClipOp, Skia, TileMode} from '@shopify/react-native-skia';
 
-/**
- * Entry point component
- *
- * @return {JSX.Element} Component
- */
-function Index(): JSX.Element {
-  return (
-    <SafeAreaProvider>
-      <NavigationContainer>
-        <FaceDetection />
-      </NavigationContainer>
-    </SafeAreaProvider>
-  );
-}
-
-/**
- * Face detection component
- *
- * @return {JSX.Element} Component
- */
-function FaceDetection(): JSX.Element {
-  const [detectedFaces, setDetectedFaces] = useState<Face[]>([]);
+function App(): React.JSX.Element {
   const {hasPermission, requestPermission} = useCameraPermission();
-  const [cameraMounted, setCameraMounted] = useState<boolean>(false);
-  const [cameraPaused, setCameraPaused] = useState<boolean>(false);
-  const [autoScale, setAutoScale] = useState<boolean>(true);
-  const faceDetectionOptions = useRef<FaceDetectionOptions>({
-    performanceMode: 'fast',
-    classificationMode: 'none',
-    minFaceSize: 0.1,
-    trackingEnabled: true,
-    autoScale: true,
-  }).current;
-  const isFocused = useIsFocused();
-  const appState = useAppState();
-  const isCameraActive = !cameraPaused && isFocused && appState === 'active';
-  const cameraDevice = useCameraDevice('back');
-  //
-  // vision camera ref
-  //
-  const camera = useRef<VisionCamera>(null);
-  //
-  // face rectangle position
-  //
-  // const aFaceW = useSharedValue(0);
-  // const aFaceH = useSharedValue(0);
-  // const aFaceX = useSharedValue(0);
-  // const aFaceY = useSharedValue(0);
-  // const animatedStyle = useAnimatedStyle(() => ({
-  //   position: 'absolute',
-  //   borderWidth: 4,
-  //   borderLeftColor: 'rgb(0,255,0)',
-  //   borderRightColor: 'rgb(0,255,0)',
-  //   borderBottomColor: 'rgb(0,255,0)',
-  //   borderTopColor: 'rgb(255,0,0)',
-  //   width: withTiming(aFaceW.value, {
-  //     duration: 100,
-  //   }),
-  //   height: withTiming(aFaceH.value, {
-  //     duration: 100,
-  //   }),
-  //   left: withTiming(aFaceX.value, {
-  //     duration: 100,
-  //   }),
-  //   top: withTiming(aFaceY.value, {
-  //     duration: 100,
-  //   }),
-  // }));
+  const [position, setPosition] = useState<CameraPosition>('back');
+  const device = useCameraDevice(position);
+  const format = useCameraFormat(device, [
+    {
+      videoResolution: Dimensions.get('window'),
+    },
+    {
+      fps: 60,
+    },
+  ]);
 
   useEffect(() => {
-    if (hasPermission) return;
-    requestPermission();
+    if (!hasPermission) {
+      requestPermission();
+    }
+  }, [hasPermission, requestPermission]);
+
+  const {detectFaces} = useFaceDetector({
+    performanceMode: 'fast',
+    contourMode: 'none',
+    landmarkMode: 'none',
+    classificationMode: 'none',
+  });
+
+  const blurRadius = 25;
+  const blurFilter = Skia.ImageFilter.MakeBlur(
+    blurRadius,
+    blurRadius,
+    TileMode.Repeat,
+    null,
+  );
+  const paint = Skia.Paint();
+  paint.setImageFilter(blurFilter);
+
+  const frameProcessor = useSkiaFrameProcessor(frame => {
+    'worklet';
+    frame.render();
+
+    const faces = detectFaces(frame);
+
+    for (const face of faces) {
+      if (face.contours != null) {
+        // this is a foreground face, draw precise mask with edges
+        const path = Skia.Path.Make();
+
+        const necessaryContours: (keyof Contours)[] = [
+          'FACE',
+          'LEFT_CHEEK',
+          'RIGHT_CHEEK',
+        ];
+        for (const key of necessaryContours) {
+          const points = face.contours[key];
+          points.forEach((point, index) => {
+            if (index === 0) {
+              // it's a starting point
+              path.moveTo(point.x, point.y);
+            } else {
+              // it's a continuation
+              path.lineTo(point.x, point.y);
+            }
+          });
+          path.close();
+        }
+
+        frame.save();
+        frame.clipPath(path, ClipOp.Intersect, true);
+        frame.render(paint);
+        frame.restore();
+      } else {
+        // this is a background face, just use a simple blur circle
+        const path = Skia.Path.Make();
+        console.log(`Face at ${face.bounds.x}, ${face.bounds.y}`);
+
+        const rect = Skia.XYWHRect(
+          face.bounds.x,
+          face.bounds.y,
+          face.bounds.width,
+          face.bounds.height,
+        );
+        path.addOval(rect);
+
+        frame.save();
+        frame.clipPath(path, ClipOp.Intersect, true);
+        frame.render(paint);
+        frame.restore();
+      }
+    }
   }, []);
 
-  /**
-   * Hanldes camera mount error event
-   *
-   * @param {any} error Error event
-   */
-  function handleCameraMountError(error: any) {
-    console.error('camera mount error', error);
-  }
-
-  /**
-   * Handle detection result
-   *
-   * @param {Face[]} faces Detection result
-   * @param frame
-   * @returns {void}
-   */
-  function handleFacesDetected(faces: Face[], frame: Frame): void {
-    if (faces.length > 0) {
-      console.log('faces', faces.length, 'frame', frame.toString());
-    }
-    // if no faces are detected we do nothing
-    if (Object.keys(faces).length <= 0) return;
-
-    const {bounds} = faces[0];
-    const {width, height, x, y} = bounds;
-    // aFaceW.value = width;
-    // aFaceH.value = height;
-    // aFaceX.value = x;
-    // aFaceY.value = y;
-    setDetectedFaces(faces);
-
-    // only call camera methods if ref is defined
-    if (camera.current) {
-      // take photo, capture video, etc...
-    }
-  }
+  const flipCamera = useCallback(() => {
+    setPosition(pos => (pos === 'front' ? 'back' : 'front'));
+  }, []);
 
   return (
-    <>
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-        ]}>
-        {hasPermission && cameraDevice ? (
-          <>
-            {cameraMounted && (
-              <>
-                <Camera
-                  ref={camera}
-                  outputOrientation="device"
-                  style={StyleSheet.absoluteFill}
-                  isActive={isCameraActive}
-                  device={cameraDevice}
-                  onError={handleCameraMountError}
-                  faceDetectionCallback={handleFacesDetected}
-                  faceDetectionOptions={{
-                    ...faceDetectionOptions,
-                    autoScale,
-                  }}
-                />
-
-                {detectedFaces &&
-                  detectedFaces.map((face, index) => {
-                    const {bounds} = face;
-                    const {width, height, x, y} = bounds;
-
-                    console.log(
-                      'width:',
-                      width,
-                      'height:',
-                      height,
-                      'x:',
-                      x,
-                      'y:',
-                      y,
-                    );
-
-                    return (
-                      <Animated.View
-                        key={index}
-                        style={[
-                          {
-                            position: 'absolute',
-                            backgroundColor: 'red',
-                            width: width,
-                            height: height,
-                            left: x,
-                            top: y,
-                          },
-                        ]}
-                      />
-                    );
-                  })}
-
-                {cameraPaused && (
-                  <Text
-                    style={{
-                      width: '100%',
-                      backgroundColor: 'rgb(0,0,255)',
-                      textAlign: 'center',
-                      color: 'white',
-                    }}>
-                    Camera is PAUSED
-                  </Text>
-                )}
-              </>
-            )}
-
-            {!cameraMounted && (
-              <Text
-                style={{
-                  width: '100%',
-                  backgroundColor: 'rgb(255,255,0)',
-                  textAlign: 'center',
-                }}>
-                Camera is NOT mounted
-              </Text>
-            )}
-          </>
+    <View style={styles.container} onTouchEnd={flipCamera}>
+      {hasPermission ? (
+        device != null ? (
+          <Camera
+            style={styles.camera}
+            isActive={true}
+            device={device}
+            format={format}
+            frameProcessor={frameProcessor}
+            fps={format?.maxFps}
+            pixelFormat="rgb"
+            exposure={0}
+          />
         ) : (
-          <Text
-            style={{
-              width: '100%',
-              backgroundColor: 'rgb(255,0,0)',
-              textAlign: 'center',
-              color: 'white',
-            }}>
-            No camera device or permission
+          <View style={styles.textContainer}>
+            <Text style={styles.text}>
+              Your phone does not have a {position} Camera.
+            </Text>
+          </View>
+        )
+      ) : (
+        <View style={styles.textContainer}>
+          <Text style={styles.text} numberOfLines={5}>
+            FaceBlurApp needs Camera permission.{' '}
+            <Text style={styles.link} onPress={Linking.openSettings}>
+              Grant
+            </Text>
           </Text>
-        )}
-      </View>
-
-      <View
-        style={{
-          position: 'absolute',
-          bottom: 20,
-          left: 0,
-          right: 0,
-          display: 'flex',
-          flexDirection: 'row',
-          justifyContent: 'space-between',
-        }}>
-        <Button
-          onPress={() => setAutoScale(current => !current)}
-          title={`${autoScale ? 'Disable' : 'Enable'} scale`}
-        />
-
-        <Button
-          onPress={() => setCameraPaused(current => !current)}
-          title={`${cameraPaused ? 'Resume' : 'Pause'} Cam`}
-        />
-
-        <Button
-          onPress={() => setCameraMounted(current => !current)}
-          title={`${cameraMounted ? 'Unmount' : 'Mount'} Cam`}
-        />
-      </View>
-    </>
+        </View>
+      )}
+    </View>
   );
 }
 
-export default Index;
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  camera: {
+    flex: 1,
+  },
+  textContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  text: {
+    maxWidth: '60%',
+    fontWeight: 'bold',
+    fontSize: 15,
+    color: 'black',
+  },
+  link: {
+    color: 'rgb(80, 80, 255)',
+  },
+});
+
+export default App;
