@@ -42,9 +42,9 @@ function App(): React.JSX.Element {
 
   const {detectFaces} = useFaceDetector({
     performanceMode: 'fast',
-    contourMode: 'none',
-    landmarkMode: 'none',
-    classificationMode: 'none',
+    contourMode: 'all',
+    landmarkMode: 'all',
+    classificationMode: 'all',
   });
 
   const blurRadius = 25;
@@ -64,8 +64,9 @@ function App(): React.JSX.Element {
     const faces = detectFaces(frame);
 
     for (const face of faces) {
-      if (face.contours != null) {
-        // this is a foreground face, draw precise mask with edges
+      console.log('Detected face contours:', face.contours);
+
+      if (face.contours) {
         const path = Skia.Path.Make();
 
         const necessaryContours: (keyof Contours)[] = [
@@ -74,17 +75,17 @@ function App(): React.JSX.Element {
           'RIGHT_CHEEK',
         ];
         for (const key of necessaryContours) {
-          const points = face.contours[key];
-          points.forEach((point, index) => {
-            if (index === 0) {
-              // it's a starting point
-              path.moveTo(point.x, point.y);
-            } else {
-              // it's a continuation
-              path.lineTo(point.x, point.y);
-            }
-          });
-          path.close();
+          if (face.contours[key]) {
+            const points = face.contours[key];
+            points.forEach((point, index) => {
+              if (index === 0) {
+                path.moveTo(point.x, point.y);
+              } else {
+                path.lineTo(point.x, point.y);
+              }
+            });
+            path.close();
+          }
         }
 
         frame.save();
@@ -92,22 +93,7 @@ function App(): React.JSX.Element {
         frame.render(paint);
         frame.restore();
       } else {
-        // this is a background face, just use a simple blur circle
-        const path = Skia.Path.Make();
-        console.log(`Face at ${face.bounds.x}, ${face.bounds.y}`);
-
-        const rect = Skia.XYWHRect(
-          face.bounds.x,
-          face.bounds.y,
-          face.bounds.width,
-          face.bounds.height,
-        );
-        path.addOval(rect);
-
-        frame.save();
-        frame.clipPath(path, ClipOp.Intersect, true);
-        frame.render(paint);
-        frame.restore();
+        console.warn('No contours detected for this face');
       }
     }
   }, []);
